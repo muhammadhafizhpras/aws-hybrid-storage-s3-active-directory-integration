@@ -132,7 +132,203 @@ This architecture was built for **portfolio/demo purposes with a focus on cost o
 
 ---
 
-## 6. Roadmap / Next Steps
+## 6. Project Structure (Terraform)
+
+This project's Infrastructure-as-Code is built with Terraform, following **modular & reusable** principles and aligned with the pillars of the **AWS Well-Architected Framework**. Each architecture component is separated into its own module with no hardcoded values, and each environment (`dev`/`prod`) simply calls the same modules with different variables.
+
+```
+aws-hybrid-storage-s3-active-directory-integration/
+│
+├── README.md
+├── .gitignore
+├── .terraform-version
+│
+├── environments/                      # Root modules per environment (separate state)
+│   ├── dev/
+│   │   ├── main.tf                    # Calls modules/ with dev-specific variables
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   ├── terraform.tfvars            # Dev-specific values (never commit sensitive values)
+│   │   ├── backend.tf                  # Remote state (S3 + DynamoDB lock) — per env
+│   │   └── providers.tf
+│   │
+│   └── prod/
+│       ├── main.tf
+│       ├── variables.tf
+│       ├── outputs.tf
+│       ├── terraform.tfvars
+│       ├── backend.tf
+│       └── providers.tf
+│
+├── modules/                            # Reusable modules — no hardcoded values
+│   │
+│   ├── networking/                     # VPC, subnets, route tables, IGW, NAT GW
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   └── README.md
+│   │
+│   ├── vpn/                            # Site-to-Site VPN, VGW, Customer Gateway
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   └── README.md
+│   │
+│   ├── active-directory/               # EC2 Windows Server + AD DS setup
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   ├── user_data.tpl               # Bootstrap script for AD DS promotion
+│   │   └── README.md
+│   │
+│   ├── storage-gateway/                # Storage Gateway appliance + EBS cache + ENI
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   ├── user_data.tpl
+│   │   └── README.md
+│   │
+│   ├── s3-backend/                     # S3 bucket + lifecycle policy + encryption + versioning
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   └── README.md
+│   │
+│   ├── vpc-endpoints/                  # Interface VPC Endpoint for Storage Gateway (cost/security)
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   └── README.md
+│   │
+│   ├── security/                       # Security Group, NACL, KMS key
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   └── README.md
+│   │
+│   ├── iam/                            # IAM roles & policies (least privilege)
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   └── README.md
+│   │
+│   └── monitoring/                     # CloudWatch alarms, dashboards, CloudTrail
+│       ├── main.tf
+│       ├── variables.tf
+│       ├── outputs.tf
+│       └── README.md
+│
+├── policies/                           # Standalone IAM policy JSON (for complex policies)
+│   ├── storage-gateway-s3-policy.json
+│   └── ad-ec2-policy.json
+│
+├── scripts/                            # Helper scripts (validation, bootstrap, cost estimate)
+│   └── validate.sh
+│
+├── docs/
+│   ├── architecture-decision-records/  # ADR — documents *why* S3+SGW was chosen over FSx, etc.
+│   │   └── 0001-choose-s3-storage-gateway-over-fsx.md
+│   ├── image/
+│   │   └── s3-hybrid-file-servers.drawio.svg
+│   └── cost-estimate.md                # From the README section above
+│
+└── tests/                              # (optional) Terratest or terraform test
+    └── networking_test.go
+```
+
+**Why this structure was chosen (aligned with the Well-Architected Framework):**
+
+| Pillar | How it's addressed |
+|---|---|
+| **Operational Excellence** | Separate `environments/` for dev/prod with isolated state; ADRs in `docs/` document architecture decisions; every module has its own `README.md` |
+| **Security** | Dedicated `security/` and `iam/` modules — least privilege, explicit SG/NACL, KMS for encryption at rest |
+| **Reliability** | Separate module per component makes it easy to add Multi-AZ AD DS or a redundant Storage Gateway without major refactoring |
+| **Performance Efficiency** | `vpc-endpoints/` module reduces latency and hops through the NAT Gateway |
+| **Cost Optimization** | `s3-backend/` module has built-in lifecycle policy; `docs/cost-estimate.md` acts as a living document; `vpc-endpoints/` reduces data transfer cost |
+
+---
+
+## 7. How to Use (Deployment Guide)
+
+### 7.1 Prerequisites
+
+- [Terraform](https://developer.hashicorp.com/terraform/downloads) matching the version pinned in `.terraform-version`
+- AWS CLI configured (`aws configure`) with credentials that have sufficient permissions (IAM user/role for VPC, EC2, S3, Storage Gateway, VPN)
+- An S3 bucket + DynamoDB table already created beforehand for remote state (create these manually once, outside of this Terraform config, since a backend can't provision itself)
+- Access to the on-premise router/firewall to configure the Customer Gateway (on-premise public IP, pre-shared key)
+
+### 7.2 Deployment Steps
+
+1. **Clone the repository and navigate to the target environment folder**
+   ```bash
+   git clone <repo-url>
+   cd aws-hybrid-storage-s3-active-directory-integration/environments/dev
+   ```
+
+2. **Fill in variables** in `terraform.tfvars` (region, VPC CIDR, instance type, on-premise CIDR, Customer Gateway IP, etc.). Never commit sensitive values (AD password, VPN PSK) — use AWS Secrets Manager/SSM Parameter Store and reference them via a data source, or pass them as `TF_VAR_*` environment variables.
+
+3. **Initialize Terraform** (downloads providers & configures the remote state backend)
+   ```bash
+   terraform init
+   ```
+
+4. **Review the infrastructure change plan**
+   ```bash
+   terraform plan -out=tfplan
+   ```
+   Review the output carefully, especially resource ordering (VPC → subnets → NAT/VGW → EC2/Storage Gateway) since there are cross-module dependencies.
+
+5. **Apply the infrastructure**
+   ```bash
+   terraform apply tfplan
+   ```
+
+6. **Activate the Storage Gateway** (a manual/semi-manual step, not fully achievable through Terraform)
+   - Once the Storage Gateway appliance EC2 instance is running, open the AWS Console → Storage Gateway → Activate gateway using the appliance's private IP (since it's accessed from within the VPC).
+   - Set up the file share, point it to the S3 bucket created by the `s3-backend` module, enable **SMB security: Active Directory authentication**, and join it to the already-live AD DS domain.
+
+7. **Configure the Customer Gateway on the on-premise side**
+   - Retrieve the VPN configuration (tunnel IPs, PSK) from the `vpn` module's Terraform output (`terraform output`), then enter it into the on-premise router/firewall according to your vendor (Cisco, MikroTik, FortiGate, etc.).
+
+8. **Verify end-to-end**
+   - From the local computer, mount the SMB share via the Storage Gateway's private IP (through the VPN): `\\<storage-gateway-private-ip>\<share-name>` (Windows) or `mount -t cifs` (Linux/Mac).
+   - Log in using AD DS credentials, and confirm that uploaded files are actually syncing to the S3 bucket.
+
+9. **Destroy (if you need to tear down an environment)**
+   ```bash
+   terraform destroy
+   ```
+   Pay attention to destroy ordering — cross-module dependencies mean the VPN/VPC should be destroyed last, after the resources that depend on them.
+
+### 7.3 Deploying to Other Environments
+
+Since all modules are reusable, deploying to `prod` simply means repeating the same steps in the `environments/prod` folder with a different `terraform.tfvars` (CIDR, larger instance sizes, Multi-AZ enabled, etc.) — no need to duplicate module code.
+
+---
+
+## 8. How It Works
+
+Once the infrastructure is deployed, here's the end-to-end system workflow:
+
+1. **Network provisioning** — the `networking` module creates the VPC, public & private subnets, route tables, Internet Gateway, and NAT Gateway. The `vpn` module creates the VGW attached to the VPC and a Customer Gateway representing the on-premise router.
+
+2. **Identity layer provisioning** — the `active-directory` module launches an EC2 Windows Server instance, bootstrapped via `user_data.tpl` to install the AD DS role and promote it to a domain controller.
+
+3. **Storage layer provisioning** — the `s3-backend` module creates the S3 bucket with encryption, versioning, and lifecycle policy. The `storage-gateway` module launches the Storage Gateway appliance EC2 instance with an attached EBS cache volume and an ENI in the private subnet.
+
+4. **Appliance activation & configuration** (manual step) — the Storage Gateway appliance "checks in" with the AWS Storage Gateway Service (control plane) for activation, and is then configured so its SMB file share connects to the S3 bucket and joins the AD DS domain.
+
+5. **On-premise connection** — once the on-premise Customer Gateway is configured with details from the `vpn` module, an IPsec tunnel is established between on-premise and the VGW. Traffic between the local computer and the VPC (in both directions) flows through this tunnel, routed by the private subnet's route table.
+
+6. **Day-to-day user access** — users on local computers mount the SMB share as if accessing a regular office file server. On each request, Storage Gateway validates authentication against Windows Server AD DS, then serves the file from the EBS cache (if present) or retrieves it from S3 (if not yet cached).
+
+7. **Sync & cost optimization run automatically** — files uploaded/modified in the EBS cache are synced to S3 in the background by Storage Gateway. The S3 Lifecycle Policy (`s3-backend` module) automatically moves infrequently accessed data to cheaper storage classes (S3-IA → Glacier) without manual intervention.
+
+8. **Monitoring runs passively** — the `monitoring` module collects CloudWatch metrics (cache hit ratio, upload buffer, etc.) and CloudTrail logs, so the team can track system health and cost trends over time.
+
+---
+
+## 9. Roadmap / Next Steps
 
 - [ ] Implement VPC Endpoint for Storage Gateway
 - [ ] Add S3 Lifecycle Policy
