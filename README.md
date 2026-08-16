@@ -1,1 +1,1 @@
-![Diagram Arsitektur AWS](./image/s3-hybrid-file-server.svg)
+![Diagram Arsitektur AWS](./image/s3-hybrid-file-servers.drawio.svg)
