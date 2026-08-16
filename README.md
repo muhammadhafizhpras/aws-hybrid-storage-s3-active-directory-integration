@@ -1,1 +1,1 @@
-(./image/s3-hybrid-file-serversss.drawio)
+![Diagram Arsitektur AWS](./image/s3-hybrid-file-server.png)
